@@ -1,0 +1,261 @@
+# knowledge/rules/rate_backoff_rules.yaml
+# SAM-∞ v28-Ω  Rate Backoff & Proxy Rotation Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "速率回退规则：per-WAF 指纹 → 推荐 RPS 上限；429/503 退避策略；proxy 轮换触发阈值"
+
+# ── 全局默认速率限制 ───────────────────────────────────────────────────────────
+global_defaults:
+  max_rps_per_host: 10            # 默认每 host 最大请求速率（req/s）
+  max_concurrent_per_host: 5     # 默认每 host 最大并发连接数
+  inter_request_delay_ms: 100    # 请求间最小间隔（ms）
+  jitter_ms: 50                  # 随机抖动（±50ms，防止规律性检测）
+
+# ── per-WAF 精细速率配置 ────────────────────────────────────────────────────────
+waf_profiles:
+  cloudflare:
+    detection_markers:
+      - "CF-RAY"                    # Response Header
+      - "cloudflare"                # Server Header 或 HTML 内容
+      - "__cfduid"                  # Cookie（旧版）
+      - "cf-request-id"             # Header
+    rate_config:
+      max_rps_per_host: 3           # Cloudflare 对高频请求极敏感
+      max_concurrent_per_host: 2
+      inter_request_delay_ms: 400
+      jitter_ms: 200
+    backoff_triggers:
+      http_429:
+        initial_wait_ms: 5000
+        backoff_factor: 2           # 指数退避
+        max_wait_ms: 64000
+        action: "switch_proxy_and_backoff"
+      http_503:
+        initial_wait_ms: 10000
+        backoff_factor: 2
+        max_wait_ms: 120000
+        action: "switch_proxy_and_backoff"
+      challenge_page:               # Cloudflare JS challenge
+        marker: "Checking your browser"
+        action: "use_browser_agent"
+    proxy_rotation:
+      rotate_after_requests: 50     # 每 50 个请求轮换一次代理
+      rotate_on_status: [429, 503, 403]
+
+  akamai:
+    detection_markers:
+      - "AkamaiGHost"
+      - "X-Check-Cacheable"
+      - "X-Akamai-Transformed"
+    rate_config:
+      max_rps_per_host: 5
+      max_concurrent_per_host: 3
+      inter_request_delay_ms: 250
+      jitter_ms: 100
+    backoff_triggers:
+      http_429:
+        initial_wait_ms: 3000
+        backoff_factor: 2
+        max_wait_ms: 32000
+        action: "switch_proxy_and_backoff"
+      http_403:
+        initial_wait_ms: 5000
+        backoff_factor: 1.5
+        max_wait_ms: 30000
+        action: "switch_proxy_and_backoff"
+    proxy_rotation:
+      rotate_after_requests: 30
+      rotate_on_status: [429, 403, 503]
+
+  aws_waf:
+    detection_markers:
+      - "x-amzn-RequestId"
+      - "X-AMZ-cf-id"
+      - "x-amz-apigw-id"
+      - "aws-cf-id"
+    rate_config:
+      max_rps_per_host: 8
+      max_concurrent_per_host: 4
+      inter_request_delay_ms: 150
+      jitter_ms: 75
+    backoff_triggers:
+      http_429:
+        initial_wait_ms: 2000
+        backoff_factor: 2
+        max_wait_ms: 32000
+        action: "switch_proxy_and_backoff"
+    proxy_rotation:
+      rotate_after_requests: 100
+      rotate_on_status: [429, 503]
+
+  f5_bigip:
+    detection_markers:
+      - "BigIP"
+      - "BIGipServer"
+      - "F5"
+      - "TS[0-9a-f]+"              # BIG-IP persistence cookie 模式
+    rate_config:
+      max_rps_per_host: 6
+      max_concurrent_per_host: 3
+      inter_request_delay_ms: 200
+      jitter_ms: 100
+    backoff_triggers:
+      http_429:
+        initial_wait_ms: 4000
+        backoff_factor: 2
+        max_wait_ms: 64000
+        action: "switch_proxy_and_backoff"
+    proxy_rotation:
+      rotate_after_requests: 40
+      rotate_on_status: [429, 503, 403]
+
+  imperva_incapsula:
+    detection_markers:
+      - "X-CDN: Incapsula"
+      - "incap_ses"                 # Cookie 前缀
+      - "visid_incap"               # Cookie 前缀
+      - "_incap_"                   # Cookie 前缀
+    rate_config:
+      max_rps_per_host: 4
+      max_concurrent_per_host: 2
+      inter_request_delay_ms: 300
+      jitter_ms: 150
+    backoff_triggers:
+      http_429:
+        initial_wait_ms: 8000
+        backoff_factor: 2
+        max_wait_ms: 128000
+        action: "switch_proxy_and_backoff"
+      captcha_page:
+        marker: "/_Incapsula_Resource"
+        action: "use_browser_agent_with_captcha_solver"
+    proxy_rotation:
+      rotate_after_requests: 20
+      rotate_on_status: [429, 503, 403]
+
+  no_waf:
+    detection_markers: []           # 未检测到已知 WAF 标志
+    rate_config:
+      max_rps_per_host: 15
+      max_concurrent_per_host: 8
+      inter_request_delay_ms: 75
+      jitter_ms: 25
+    backoff_triggers:
+      http_429:
+        initial_wait_ms: 2000
+        backoff_factor: 2
+        max_wait_ms: 16000
+        action: "backoff_only"
+      http_503:
+        initial_wait_ms: 3000
+        backoff_factor: 2
+        max_wait_ms: 30000
+        action: "backoff_only"
+    proxy_rotation:
+      rotate_after_requests: 200
+      rotate_on_status: [429, 503]
+
+# ── 指数退避算法参数 ────────────────────────────────────────────────────────────
+exponential_backoff:
+  formula: "wait_ms = min(initial_wait_ms * (backoff_factor ^ attempt), max_wait_ms)"
+  jitter_type: "full_jitter"       # wait_ms = random(0, wait_ms)（完全抖动，防止惊群）
+  max_attempts: 5                  # 最多重试 5 次
+  give_up_action: "skip_endpoint"  # 达到最大重试后跳过本端点
+
+# ── 代理池管理策略 ─────────────────────────────────────────────────────────────
+proxy_pool_management:
+  health_check:
+    interval_seconds: 300          # 每 5 分钟检查一次代理健康状态
+    timeout_seconds: 10            # 健康检查超时
+    test_url: "https://httpbin.org/ip"
+    expected_response_field: "origin"
+
+  rotation_strategy:
+    method: "round_robin_with_exclusion"
+    exclude_on_failure: true        # 失败的代理临时排除
+    exclusion_duration_seconds: 300 # 排除时长 5 分钟
+
+  dead_proxy_detection:
+    consecutive_failures: 3         # 连续失败 3 次 → 标记为死亡
+    recovery_check_interval: 600   # 10 分钟后重新检查
+
+  emergency_stop:
+    description: "代理池全部耗尽时的紧急停止机制"
+    trigger: "available_proxies == 0"
+    action: "pause_scanning"       # 暂停扫描，不裸连公网
+    notification: "记录 EgressViolation 并等待人工恢复"
+
+# ── 429 / 503 响应处理流程 ─────────────────────────────────────────────────────
+status_code_handlers:
+  http_429:
+    name: "Too Many Requests"
+    actions:
+      - "记录 429 到轨迹（trajectory_store）"
+      - "立即停止对当前 host 的请求"
+      - "切换到代理池中下一个可用代理"
+      - "按 WAF profile 的退避参数执行指数退避"
+      - "退避结束后恢复请求"
+
+  http_503:
+    name: "Service Unavailable"
+    actions:
+      - "区分 WAF 503（主动拦截）和服务器过载 503"
+      - "WAF 503：切换代理 + 长时间退避"
+      - "服务器过载 503：短时退避后重试（不切换代理）"
+      - "WAF 识别特征：响应包含 WAF 特有 HTML 内容"
+
+  http_403:
+    name: "Forbidden"
+    actions:
+      - "区分 IP 封锁（403）和权限不足（403）"
+      - "IP 封锁特征：响应包含 'Your IP has been blocked' 等"
+      - "IP 封锁：切换代理"
+      - "权限不足：记录并跳过，不切换代理"
+
+  http_400:
+    name: "Bad Request"
+    actions:
+      - "检查是否因 WAF 拦截了 payload"
+      - "尝试 WAF bypass 变体"
+      - "若连续 5 个 payload 均 400，切换 bypass 策略"
+
+# ── 工具专用速率配置 ────────────────────────────────────────────────────────────
+tool_rate_config:
+  subfinder:
+    max_threads: 50
+    timeout_seconds: 30
+    note: "被动枚举，对目标服务器无直接请求压力"
+
+  httpx:
+    max_threads: 50
+    timeout_seconds: 10
+    note: "存活探测，每 host 仅发 1–2 个请求"
+
+  naabu:
+    rate_pps: 1000                  # 包/秒（非 CDN 目标）
+    rate_pps_cdn: 300               # CDN 目标降速
+    timeout_seconds: 5
+
+  katana:
+    max_concurrency: 10
+    depth: 3
+    timeout_seconds: 10
+    note: "爬虫对服务器压力较大，并发度控制在 10"
+
+  ffuf:
+    max_threads: 40
+    timeout_seconds: 10
+    note: "目录发现，注意速率，避免触发 DoS 保护"
+
+  nuclei:
+    max_threads: 25
+    timeout_seconds: 10
+    rate_limit: 150                 # nuclei 内置 rate limit（req/min）
+    note: "使用 -rate-limit 参数控制"
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

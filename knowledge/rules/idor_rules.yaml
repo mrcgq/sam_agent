@@ -1,0 +1,164 @@
+# knowledge/rules/idor_rules.yaml
+# SAM-∞ v28-Ω  Insecure Direct Object Reference (IDOR) Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: idor
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "IDOR 检测规则：数字/UUID/哈希 ID 枚举；A/B 账号差分验证；GraphQL IDOR"
+
+default_oracle_pattern: ""
+oracle_type: "differential_data"
+note: "IDOR 验证：响应中包含另一账号的私有数据（精确字符串匹配），不得以状态码作为证明"
+
+# ── ID 类型识别 ────────────────────────────────────────────────────────────────
+id_types:
+  numeric:
+    pattern: "^\\d+$"
+    enumeration_strategy: "自身 ID ± 10 范围枚举"
+    example: "12345 → 测试 12335..12355"
+    oracle: "响应包含他人账号的私有数据字段"
+
+  uuid_v4:
+    pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    enumeration_strategy: "不可枚举；改测参数篡改（已知他人 UUID）"
+    oracle: "响应包含另一账号数据"
+
+  short_hash:
+    pattern: "^[0-9a-f]{8,16}$"
+    enumeration_strategy: "检查是否为 MD5(user_id)；若是则可预测"
+    oracle: "差分响应内容"
+
+  base64_encoded:
+    pattern: "^[A-Za-z0-9+/]+=*$"
+    enumeration_strategy: "base64 解码后分析结构；修改 ID 后重新编码"
+    oracle: "差分响应内容"
+
+# ── 账号隔离测试流程 ────────────────────────────────────────────────────────────
+account_isolation_test:
+  description: |
+    Step 1: 注册/登录账号 A，获取 session_a
+    Step 2: 注册/登录账号 B，获取 session_b
+    Step 3: 用 session_b 访问账号 A 拥有的资源，记录资源 ID
+    Step 4: 切换到 session_a，尝试访问账号 B 的资源 ID
+    Step 5: Oracle 验证：响应中包含账号 B 的私有数据字段
+
+  private_data_markers:
+    - email
+    - phone
+    - address
+    - credit_card
+    - ssn
+    - date_of_birth
+    - password_hash
+    - api_key
+    - private_key
+    - session_token
+
+  test_endpoints_patterns:
+    - "/api/users/{id}"
+    - "/api/orders/{id}"
+    - "/api/invoices/{id}"
+    - "/api/documents/{id}"
+    - "/api/messages/{id}"
+    - "/api/profile/{id}"
+    - "/api/settings/{id}"
+    - "/api/files/{id}"
+    - "/api/reports/{id}"
+    - "/admin/users/{id}"
+
+# ── 水平越权测试 payload ────────────────────────────────────────────────────────
+payloads:
+  # 数字 ID 枚举（参数值为自身 ID 的邻近值）
+  - payload: "{numeric_id_minus_1}"
+    oracle_pattern: "{account_b_private_data}"
+    category: numeric_enumeration
+    confidence: 0.80
+
+  - payload: "{numeric_id_plus_1}"
+    oracle_pattern: "{account_b_private_data}"
+    category: numeric_enumeration
+    confidence: 0.80
+
+  # ID 类型混淆
+  - payload: "0"
+    oracle_pattern: ""
+    category: zero_id
+    confidence: 0.65
+    note: "某些系统 ID=0 返回第一个用户或超级管理员"
+
+  - payload: "-1"
+    oracle_pattern: ""
+    category: negative_id
+    confidence: 0.60
+
+  - payload: "null"
+    oracle_pattern: ""
+    category: null_id
+    confidence: 0.60
+
+  - payload: "undefined"
+    oracle_pattern: ""
+    category: undefined_id
+    confidence: 0.58
+
+  # 参数污染
+  - payload: "?id={own_id}&id={other_id}"
+    oracle_pattern: "{other_account_data}"
+    category: hpp
+    confidence: 0.72
+
+  # JSON 数组注入
+  - payload: "[{own_id}, {other_id}]"
+    oracle_pattern: "{other_account_data}"
+    category: json_array
+    confidence: 0.70
+    note: "部分 API 接受 ID 数组，返回多个用户数据"
+
+# ── GraphQL IDOR ────────────────────────────────────────────────────────────────
+graphql:
+  introspection_query: |
+    {
+      __schema {
+        types {
+          name
+          fields { name type { name } }
+        }
+      }
+    }
+
+  idor_query_template: |
+    {
+      user(id: "{target_id}") {
+        id
+        email
+        phone
+        address
+        privateData
+      }
+    }
+
+  batch_query_template: |
+    [
+      {"query": "{ user(id: \"{own_id}\") { email } }"},
+      {"query": "{ user(id: \"{target_id}\") { email } }"}
+    ]
+
+  oracle_pattern: "email|phone|private"
+  note: "GraphQL IDOR：批量查询绕过单次权限检查"
+
+# ── 垂直越权测试 ────────────────────────────────────────────────────────────────
+vertical_privilege_escalation:
+  description: "普通用户访问管理员专属端点"
+  test_patterns:
+    - "/admin/*"
+    - "/api/admin/*"
+    - "/api/internal/*"
+    - "/management/*"
+    - "/dashboard/admin/*"
+  oracle: "响应包含管理员功能数据或用户列表"
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

